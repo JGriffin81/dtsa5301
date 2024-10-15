@@ -8,6 +8,8 @@ output: pdf_document
 
 This is an analysis of COVID-19 data downloaded from the [Johns Hopkins University repository](https://github.com/CSSEGISandData/COVID-19).
 
+This document uses packages from the tidyverse (`install.packages("tidyverse")`), and uses zoo (`install.packages("zoo")`) to perform a rolling average.
+
 For this analysis I will focus primarily on the confirmed cases and deaths in the United States. First, I will download these from the source repository and store them in data frames. I have defined a function to use a locally saved version if the dataset has already been downloaded.
 
 ```{r load_covid19_data}

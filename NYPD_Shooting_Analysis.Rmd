@@ -8,6 +8,8 @@ output: pdf_document
 
 This document uses the NYPD Historic shooting data located at [NYPD Shooting Data (Historic)](https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD "NYPD Shooting Data (Historic)").
 
+The analysis does not use any packages outside of the tidyverse (`install.packages("tidyverse")`)
+
 Following is a summary of the raw data set.
 
 ```{r load_shooting_data}
