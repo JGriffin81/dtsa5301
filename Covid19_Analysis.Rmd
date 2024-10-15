@@ -1,0 +1,165 @@
+---
+title: "Covid 19 Analysis"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+## Covid 19 Data Analysis
+
+This is an analysis of COVID-19 data downloaded from the [Johns Hopkins University repository](https://github.com/CSSEGISandData/COVID-19).
+
+For this analysis I will focus primarily on the confirmed cases and deaths in the United States. First, I will download these from the source repository and store them in data frames. I have defined a function to use a locally saved version if the dataset has already been downloaded.
+
+```{r load_covid19_data}
+# Caches files locally after initial download; these datasets are archived and
+# will not change in the future.
+load_covid_csv <- function(path) {
+  url_base <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/refs/heads/master/csse_covid_19_data/csse_covid_19_time_series/"
+
+  if (!file.exists(path)) {
+    download.file(paste(url_base, path, sep=""), destfile = path, mode = "wb")
+  }
+  
+  return(read.csv(path))
+}
+
+cases <- load_covid_csv("time_series_covid19_confirmed_US.csv")
+deaths <- load_covid_csv("time_series_covid19_deaths_US.csv")
+```
+
+## Tidying the Data
+
+First, we'll convert the statistics into a long format, rather than a wide format to make the analysis easier. I'll also convert these named date columns into actual Date types after reshaping the table in the long format.
+
+Finally, I will merge the two datasets on their common columns (UID, Admin2, Province_State, Date) so that we can easily see confirmed cases and deaths in the same data frame.
+
+```{r tidy_data}
+
+library(tidyverse)
+library(lubridate)
+
+# Reshape cases data
+cases_long <- cases %>%
+  pivot_longer(
+    cols = matches("^X\\d{1,2}\\.\\d{1,2}\\.\\d{2,4}$"),
+    names_to = "Date",
+    values_to = "Cases"
+  )
+cases_long$Date <- gsub("^X", "", cases_long$Date)
+cases_long$Date <- mdy(cases_long$Date)
+
+# Reshape deaths data
+deaths_long <- deaths %>%
+  pivot_longer(
+    cols = matches("^X\\d{1,2}\\.\\d{1,2}\\.\\d{2,4}$"),
+    names_to = "Date",
+    values_to = "Deaths"
+  )
+deaths_long$Date <- gsub("^X", "", deaths_long$Date)
+deaths_long$Date <- mdy(deaths_long$Date)
+
+# Ensure columns are the same for merging
+cases_long <- cases_long %>%
+  select(UID, Admin2, Province_State, Date, Cases)
+
+deaths_long <- deaths_long %>%
+  select(UID, Admin2, Province_State, Date, Deaths)
+
+# Merge datasets on UID, Admin2, Province_State, and Date
+covid_data <- merge(cases_long, deaths_long, by = c("UID", "Admin2", "Province_State", "Date"))
+
+```
+
+## Visualizing the Data
+
+The data is already stored in a cumulative format over time. To visualize the change in cases and deaths over time for the entire country, we can group these records by date and take a sum of the Cases and Deaths column.
+
+Figures 1 and 2 show the total cases and deaths over time in the United States.
+
+```{r visualizing-1}
+
+# Aggregate data by Date
+total_over_time <- covid_data %>%
+  group_by(Date) %>%
+  summarize(
+    Total_Cases = sum(Cases, na.rm = TRUE),
+    Total_Deaths = sum(Deaths, na.rm = TRUE)
+  )
+
+# Plot total cases over time
+ggplot(total_over_time, aes(x = Date, y = Total_Cases)) +
+  geom_line(color = "blue") +
+  labs(title = "Total COVID-19 Cases Over Time in the US", y = "Total Cases")
+
+# Plot total deaths over time
+ggplot(total_over_time, aes(x = Date, y = Total_Deaths)) +
+  geom_line(color = "red") +
+  labs(title = "Total COVID-19 Deaths Over Time in the US", y = "Total Deaths")
+```
+
+We can use the `lag` function to take these cumulative numbers and instead find the number of daily new cases; essentially this will subtract the previous record's value from the cumulative total.
+
+To remove the apparent jitter, likely caused by different reporting intervals, I'm also applying a 7-day rolling average to the new cases and deaths. This will be helpful in producing an interpretable model.
+
+Figures 3 and 4 show the number of new cases and deaths over time in the United States.
+
+```{r visualizing-2}
+# Calculate daily new cases and deaths
+total_over_time <- total_over_time %>%
+  arrange(Date) %>%
+  mutate(
+    New_Cases = Total_Cases - lag(Total_Cases, default = 0),
+    New_Deaths = Total_Deaths - lag(Total_Deaths, default = 0)
+  )
+
+# Calculate 7-day moving average for new cases and deaths
+total_over_time <- total_over_time %>%
+  mutate(
+    New_Cases_MA = zoo::rollmean(New_Cases, k = 7, fill = NA),
+    New_Deaths_MA = zoo::rollmean(New_Deaths, k = 7, fill = NA)
+  )
+
+total_over_time <- total_over_time %>%
+  filter(!is.na(New_Cases_MA)) %>%
+  filter(!is.na(New_Deaths_MA))
+
+# Plot daily new cases
+ggplot(total_over_time, aes(x = Date, y = New_Cases_MA)) +
+  geom_bar(stat = "identity", fill = "blue") +
+  labs(title = "Daily New COVID-19 Cases in the US", y = "New Cases")
+
+# Plot daily new deaths
+ggplot(total_over_time, aes(x = Date, y = New_Deaths_MA)) +
+  geom_bar(stat = "identity", fill = "red") +
+  labs(title = "Daily New COVID-19 Deaths in the US", y = "New Deaths")
+
+```
+
+## Modeling the Data
+
+We can model the new case and death rate presented by this dataset using LOESS smoothing, a method of curve fitted using local regression. This allows us to better see the development of the larger trend over time.
+
+I think there is little interpretation that can be provided by the model from this dataset alone, given the number of other factors that influenced the spread and fatality rate of the disease. Some of these are discussed in the `Bias Considerations` section, but generally I think that a good model would need to incorporate factors like testing rate, public policy, vaccination rate, etc.
+
+```{r modeling}
+
+# Use LOESS smoothing (locally weighted regression)
+ggplot(total_over_time, aes(x = Date, y = New_Cases_MA)) +
+  geom_line(color = "blue") +
+  geom_smooth(method = "loess", span = 0.2, color = "red", se = FALSE) +
+  labs(title = "Smoothed Trend of New Cases (7-day MA)", y = "New Cases")
+
+
+# Use LOESS smoothing (locally weighted regression)
+ggplot(total_over_time, aes(x = Date, y = New_Deaths_MA)) +
+  geom_line(color = "blue") +
+  geom_smooth(method = "loess", span = 0.2, color = "red", se = FALSE) +
+  labs(title = "Smoothed Trend of New Deaths (7-day MA)", y = "New Deaths")
+
+```
+
+## Bias Considerations
+
+As mentioned, there are a number of external factors not captured in this dataset that likely play a very important role both in the rate of confirmed cases, as well as in the case fatality rate. There were diverse approaches to dealing with the COVID-19 pandemic across the United States. Without considering these impacts on the data shown here, it is difficult to draw conclusions across the entire population.
+
+We can note that of the two largest peaks in cases, in 2021 and 2022, there was a substantial reduction in CFR due to the latter peak. This could be a combined effect of better and more widespread testing, as well as rising vaccination rate, for example.

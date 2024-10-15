@@ -1,0 +1,223 @@
+---
+title: "NYPD Shooting Analysis"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+## NYPD Shooting Data (Historic)
+
+This document uses the NYPD Historic shooting data located at [NYPD Shooting Data (Historic)](https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD "NYPD Shooting Data (Historic)").
+
+Following is a summary of the raw data set.
+
+```{r load_shooting_data}
+# Set the URL and the local file path
+url <- "https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD"
+local_file <- "NYPD_Shooting_Incident_Data.csv"
+
+# Download the file
+download.file(url, destfile = local_file)
+
+# Load the data from the downloaded file
+shooting_data <- read.csv(local_file, stringsAsFactors = FALSE)
+
+summary(shooting_data)
+```
+
+## Cleaning the Data
+
+Next, we will tidy the data to handle missing values, correct data types, and correct/remove anomalies. I am interested in patterns related to the occurrence of incidents by date; are there any apparent seasonal patterns?
+
+```{r clean_shooting_data}
+library(dplyr)
+library(tidyr)
+
+# Convert date and time columns to datetime objects
+shooting_data$OCCUR_DATE <- as.Date(shooting_data$OCCUR_DATE, format = "%m/%d/%Y")
+shooting_data$OCCUR_TIME <- hms::as_hms(shooting_data$OCCUR_TIME)
+
+# Remove rows with missing values in critical columns
+shooting_data <- shooting_data %>% drop_na(OCCUR_DATE, OCCUR_TIME)
+
+# Remove duplicate rows if any
+shooting_data <- shooting_data %>% distinct()
+
+summary(shooting_data)
+
+```
+
+## Visualizing the Data
+
+I am interested in seasonal patterns of shooting incidents, so I will create additional factors to categorize incidents by Year + Month, and Month. Then I plot the seasonal data to look for signs of a seasonal, and the monthly data to visualize the trend irrespective of the year.
+
+```{r visualize_shooting_data}
+
+library(lubridate)
+library(ggplot2)
+
+# Extract year-month from the OCCUR_DATE
+shooting_data <- shooting_data %>%
+  mutate(YearMonth = floor_date(OCCUR_DATE, "month"))
+
+# Count incidents by month
+monthly_trend <- shooting_data %>%
+  group_by(YearMonth) %>%
+  summarize(Incidents = n())
+
+# Plot the annual trend
+ggplot(monthly_trend, aes(x = YearMonth, y = Incidents)) +
+  geom_line() +
+  labs(title = "Trend of Shooting Incidents Over Time", x = "Year-Month", y = "Number of Incidents")
+
+# Extract the month from the OCCUR_DATE
+shooting_data <- shooting_data %>%
+  mutate(Month = month(OCCUR_DATE, label = TRUE))
+
+# Aggregate incidents by month
+monthly_distribution <- shooting_data %>%
+  group_by(Month) %>%
+  summarize(Incidents = n())
+
+# Plot the monthly distribution
+ggplot(monthly_distribution, aes(x = Month, y = Incidents, group = 1)) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Seasonal Pattern of Shooting Incidents by Month", x = "Month", y = "Number of Incidents") +
+  theme_minimal()
+
+```
+
+## Analyzing the Data
+
+From the visualization it is seems that shooting incidents peak in the summer and are at their lowest in the winter months. I can also see a trend of shooting incidents decreasing from 2009 until 2020, when they quickly spike.
+
+```{r seasonal_visualization}
+
+# Create a time series object with monthly data
+ts_data <- ts(monthly_trend$Incidents, frequency = 12)
+
+# Perform STL decomposition
+stl_decomposition <- stl(ts_data, s.window = "periodic")
+
+# Plot the components
+plot(stl_decomposition)
+
+```
+
+From this decomposition, we can more specifically look at the overall trend by year.
+
+```{r seasonal_analysis}
+
+# Extract components
+seasonal_component <- stl_decomposition$time.series[, "seasonal"]
+trend_component <- stl_decomposition$time.series[, "trend"]
+residual_component <- stl_decomposition$time.series[, "remainder"]
+
+# Generate the corresponding dates for the time series
+start_date <- min(monthly_trend$YearMonth)
+end_date <- max(monthly_trend$YearMonth)
+time_points <- seq.Date(from = start_date, to = end_date, by = "month")
+
+# Create indices so we can label the x-axis by year
+time_index <- seq_along(trend_component)
+
+# Plot the trend component
+plot(time_index, trend_component, type = "l", col = "red", lwd = 2,
+     main = "Overall Trend", ylab = "Trend", xlab = "Year", xaxt = "n")
+
+# Add custom X-axis labels at appropriate intervals
+axis(1, at = time_index[seq(1, length(time_index), by = 12)], 
+     labels = format(time_points[seq(1, length(time_points), by = 12)], "%Y"), las = 2)
+
+```
+
+## Modeling the Data
+
+After separating the data into seasonal and trend components, we can produce models of each. For the seasonal component, we can use a Fourier transform to model the harmonic pattern the data shows over the years:
+
+```{r modeling_seasonal}
+
+# Given monthly data with annual seasonality (period = 12)
+period <- 12
+
+# Create sine and cosine terms for the harmonic model
+harmonics <- cbind(sin(2 * pi * time_index / period), cos(2 * pi * time_index / period))
+
+# Fit the harmonic regression model
+seasonal_model <- lm(seasonal_component ~ harmonics)
+summary(seasonal_model)
+
+plot(time_index, seasonal_component, type = "l", col = "red", lwd = 2,
+     main = "Seasonal Model", ylab = "Trend", xlab = "Year", xaxt = "n") 
+
+# Add custom X-axis labels at appropriate intervals
+axis(1, at = time_index[seq(1, length(time_index), by = 12)], 
+     labels = format(time_points[seq(1, length(time_points), by = 12)], "%Y"), las = 2)
+
+```
+
+The overall trend is more complex and likely the product of many factors not available in the source data. For instance, the Covid pandemic seems to have been a major factor in the [increase of shootings during 2020 in the US](https://everytownresearch.org/report/gun-violence-and-covid-19-in-2020-a-year-of-colliding-crises/).
+
+While a more complex model might reflect this increase, looking at data beyond 2020 indicates that the overall trend of decreased shootings seems to continue after this spike. That in mind, I will instead use a simpler linear model, knowing to expect a large variance around 2020.
+
+```{r modeling_trend}
+
+# Fit a simple linear regression model
+trend_model_linear <- lm(trend_component ~ time_index)
+summary(trend_model_linear)
+
+# Plot the trend with the fitted linear model
+plot(time_index, trend_component, type = "l", col = "red", lwd = 2,
+     main = "Trend Component with Fitted Linear Model", ylab = "Trend", xlab = "Year", xaxt="n")
+abline(trend_model_linear, col = "blue", lwd = 2)  # Add the linear fit
+
+# Add custom X-axis labels at appropriate intervals
+axis(1, at = time_index[seq(1, length(time_index), by = 12)], 
+     labels = format(time_points[seq(1, length(time_points), by = 12)], "%Y"), las = 2)
+
+```
+
+I can now combine the seasonal model with the trend model to produce a combined model:
+
+```{r combined_model}
+
+# Predict the trend component using the linear model
+trend_fitted <- predict(trend_model_linear)
+
+# Predict the seasonal component using the harmonic model
+seasonal_fitted <- predict(seasonal_model)
+
+# Combine the trend and seasonal predictions
+combined_fitted <- trend_fitted + seasonal_fitted
+
+# Plot the actual data
+plot(time_index, ts_data, type = "l", col = "black", lwd = 2,
+     main = "Actual Data vs. Combined Trend and Seasonal Model", ylab = "Shootings", xlab = "Year", xaxt = "n")
+
+# Add the combined model
+lines(time_index, combined_fitted, col = "blue", lwd = 2)
+
+# Add the trend component
+lines(time_index, trend_fitted, col = "red", lwd = 2, lty = 2)
+
+# Add X-axis labels
+axis(1, at = time_index[seq(1, length(time_index), by = 12)], 
+     labels = format(time_points[seq(1, length(time_points), by = 12)], "%Y"), las = 2)
+
+# Add a legend to differentiate the lines
+legend("top", legend = c("Actual Data", "Combined Model", "Trend Component"),
+       col = c("black", "blue", "red"), lty = c(1, 1, 2), lwd = 2)
+
+# Calculate residuals
+residuals <- ts_data - combined_fitted
+
+# Plot a histogram of residuals to assess their distribution
+hist(residuals, breaks = 20, col = "gray", main = "Histogram of Residuals", xlab = "Residuals")
+
+```
+
+## Bias Identification
+
+Some unknowns that may affect this model are the thoroughness of the underlying data, say if standards for reporting have changed over time or varied within certain precincts.
+
+The model does not consider other factors that may be important, such as economic events, political activity, etc. I chose a simple linear regression model for the overall trend to avoid overfitting the model around the occurrence of the pandemic, and including this data suggests that had the pandemic never occurred, we might expect an even steeper reduction in shootings over this period.
